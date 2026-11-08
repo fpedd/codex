@@ -51,7 +51,8 @@ impl SkillProviderSource {
                 query.executor_capability_discovery_v2.is_some() || !query.executor_roots.is_empty()
             }
             SkillSourceKind::Cloud => query.include_cloud_skills,
-            SkillSourceKind::Custom(_) => true,
+            // Listed once per step for World State by `list_custom_for_turn`.
+            SkillSourceKind::Custom(_) => false,
         }
     }
 
@@ -126,6 +127,12 @@ impl SkillProviders {
             .any(|source| source.kind == SkillSourceKind::Host)
     }
 
+    pub(crate) fn has_custom_provider(&self) -> bool {
+        self.sources
+            .iter()
+            .any(|source| matches!(source.kind, SkillSourceKind::Custom(_)))
+    }
+
     pub(crate) async fn list_for_turn(&self, query: SkillListQuery<'_>) -> SkillCatalog {
         self.list_matching(&query, |source| source.should_list(&query))
             .await
@@ -162,6 +169,13 @@ impl SkillProviders {
     pub(crate) async fn list_host_for_turn(&self, query: SkillListQuery<'_>) -> SkillCatalog {
         self.list_matching(&query, |source| source.kind == SkillSourceKind::Host)
             .await
+    }
+
+    pub(crate) async fn list_custom_for_turn(&self, query: SkillListQuery<'_>) -> SkillCatalog {
+        self.list_matching(&query, |source| {
+            matches!(source.kind, SkillSourceKind::Custom(_))
+        })
+        .await
     }
 
     async fn list_matching(

@@ -43,7 +43,7 @@ fn empty_catalog_records_zero_metrics_without_a_fragment() {
 
     let rendered = render_catalog(
         Some(&metrics),
-        CatalogSurface::ThreadContext,
+        CatalogSurface::TurnInput,
         &SkillCatalog::default(),
         /*include_skills_usage_instructions*/ false,
         SkillCatalogRenderPolicy::EXTENSION_COMPATIBLE,
