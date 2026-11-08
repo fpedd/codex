@@ -397,7 +397,13 @@ where
             thread_state
                 .replace_shadow_selection_turn(input.turn_id.clone(), shadow_selection_turn);
             let mut fragments: Vec<Box<dyn ContextualUserFragment + Send>> = Vec::new();
-            if config.include_instructions && !host_catalog_in_world_state {
+            // World State owns the host catalog once it lists it, but never custom ones.
+            let lists_turn_skills = !host_catalog_in_world_state
+                || catalog
+                    .entries
+                    .iter()
+                    .any(|entry| matches!(entry.authority.kind, SkillSourceKind::Custom(_)));
+            if config.include_instructions && lists_turn_skills {
                 let mut turn_catalog = catalog.clone();
                 turn_catalog.entries.retain(|entry| {
                     entry.authority.kind != SkillSourceKind::Executor
