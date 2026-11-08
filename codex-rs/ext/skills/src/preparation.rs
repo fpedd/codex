@@ -25,9 +25,10 @@ pub(crate) async fn prepare_catalogs(
     let mut cloud = cloud_enabled
         .then(|| thread_state.available_cloud_catalog())
         .flatten();
-    let (mut executor, host_catalog) = futures::join!(
+    let (mut executor, host_catalog, custom_catalog) = futures::join!(
         discover_executor_catalog(thread_state, providers, input, &config, cloud_enabled),
         discover_host_catalog(providers, input, &config),
+        discover_custom_catalog(providers, input, &config),
     );
     if discovery_v2 {
         apply_plugin_denials(&mut executor, input.selected_plugins);
@@ -51,6 +52,7 @@ pub(crate) async fn prepare_catalogs(
             || discovery_v2,
         catalog: thread_state.prepare_step_catalog(cloud, executor, discovery_v2),
         host_catalog,
+        custom_catalog,
         cloud_status,
         config,
     }
@@ -102,6 +104,37 @@ async fn discover_host_catalog(
                 include_bundled_skills: false,
                 include_cloud_skills: false,
                 mcp_resources: None,
+                executor_capability_discovery: None,
+                executor_capability_discovery_v2: None,
+            })
+            .await,
+    )
+}
+
+/// Lists custom sources once per step; World State renders them and turn input resolves
+/// mentions against them. Providers get the query turn input used to list them with.
+async fn discover_custom_catalog(
+    providers: &SkillProviders,
+    input: &StepPreparationInput<'_>,
+    config: &SkillsExtensionConfig,
+) -> Option<SkillCatalog> {
+    if !providers.has_custom_provider() {
+        return None;
+    }
+    let host_snapshot = HostSkillsSnapshot::for_step(input.step_store, input.turn_store);
+    Some(
+        providers
+            .list_custom_for_turn(SkillListQuery {
+                turn_id: input.turn_id.to_string(),
+                executor_roots: Vec::new(),
+                include_host_skills: host_snapshot.is_none() || !providers.has_host_provider(),
+                host_snapshot,
+                include_bundled_skills: config.bundled_skills_enabled,
+                include_cloud_skills: false,
+                mcp_resources: input
+                    .session_store
+                    .get::<SkillsSessionState>()
+                    .and_then(|state| state.mcp_resources.clone()),
                 executor_capability_discovery: None,
                 executor_capability_discovery_v2: None,
             })

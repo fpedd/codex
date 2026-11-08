@@ -524,3 +524,7 @@ impl EmittedCatalogBudgetWarnings {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct HostSkillsCatalogInWorldState;
+
+/// Custom sources' catalog is listed through World State, not turn input.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CustomSkillsCatalogInWorldState;

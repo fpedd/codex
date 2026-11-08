@@ -14,6 +14,7 @@ use crate::world_state_catalogs::CatalogBudgetAllocation;
 pub(crate) const SKILLS_WORLD_STATE_ID: &str = "skills";
 pub(crate) const CLOUD_SKILLS_WORLD_STATE_ID: &str = "cloud_skills";
 pub(crate) const HOST_SKILLS_WORLD_STATE_ID: &str = "host_skills";
+pub(crate) const CUSTOM_SKILLS_WORLD_STATE_ID: &str = "custom_skills";
 const NO_EXECUTOR_SKILLS_BODY: &str =
     "\n## Skills update\nNo selected-environment skills are currently available.\n";
 const HIDDEN_EXECUTOR_SKILLS_BODY: &str = "\n## Skills update\nSelected-environment skills are not listed automatically. Explicit skill mentions can still be resolved when available.\n";
@@ -24,6 +25,33 @@ const NO_HOST_SKILLS_BODY: &str =
     "\n## Host skills update\nNo host skills are currently available.\n";
 const HIDDEN_HOST_SKILLS_BODY: &str = "\n## Host skills update\nHost skills are not listed automatically. Explicit skill mentions can still be resolved when available.\n";
 const OMITTED_HOST_SKILLS_BODY: &str = "\n## Host skills update\nHost skills are available but omitted from the model-visible skills list because the skills context budget was exceeded.\n";
+
+const NO_CUSTOM_SKILLS_BODY: &str =
+    "\n## Custom skills update\nNo custom skills are currently available.\n";
+const HIDDEN_CUSTOM_SKILLS_BODY: &str = "\n## Custom skills update\nCustom skills are not listed automatically. Explicit skill mentions can still be resolved when available.\n";
+const OMITTED_CUSTOM_SKILLS_BODY: &str = "\n## Custom skills update\nCustom skills are available but omitted from the model-visible skills list because the skills context budget was exceeded.\n";
+
+/// A catalog section's id and the bodies it shows when it lists no skill.
+pub(crate) struct ListedSkillsSection {
+    id: &'static str,
+    no_skills_body: &'static str,
+    hidden_skills_body: &'static str,
+    omitted_skills_body: &'static str,
+}
+
+pub(crate) const HOST_SKILLS_SECTION: ListedSkillsSection = ListedSkillsSection {
+    id: HOST_SKILLS_WORLD_STATE_ID,
+    no_skills_body: NO_HOST_SKILLS_BODY,
+    hidden_skills_body: HIDDEN_HOST_SKILLS_BODY,
+    omitted_skills_body: OMITTED_HOST_SKILLS_BODY,
+};
+
+pub(crate) const CUSTOM_SKILLS_SECTION: ListedSkillsSection = ListedSkillsSection {
+    id: CUSTOM_SKILLS_WORLD_STATE_ID,
+    no_skills_body: NO_CUSTOM_SKILLS_BODY,
+    hidden_skills_body: HIDDEN_CUSTOM_SKILLS_BODY,
+    omitted_skills_body: OMITTED_CUSTOM_SKILLS_BODY,
+};
 
 pub(crate) type CatalogRenderCallback = Box<dyn Fn() + Send + Sync>;
 
@@ -207,7 +235,8 @@ fn skills_world_state_section(
     }
 }
 
-pub(crate) fn host_skills_world_state_section(
+pub(crate) fn listed_skills_world_state_section(
+    section: &ListedSkillsSection,
     body: Option<String>,
     include_instructions: bool,
     report: &SkillRenderReport,
@@ -215,22 +244,22 @@ pub(crate) fn host_skills_world_state_section(
 ) -> WorldStateSectionContribution {
     let body = body.or_else(|| {
         (report.included_count == 0 && report.omitted_count > 0)
-            .then(|| OMITTED_HOST_SKILLS_BODY.to_string())
+            .then(|| section.omitted_skills_body.to_string())
     });
     let retained_fragment = body
         .as_ref()
         .map(|body| format!("{SKILLS_INSTRUCTIONS_OPEN_TAG}{body}{SKILLS_INSTRUCTIONS_CLOSE_TAG}"));
 
     let contribution = skills_world_state_section(
-        HOST_SKILLS_WORLD_STATE_ID,
+        section.id,
         CatalogSnapshot {
             body,
             include_instructions,
             enabled: None,
             allocation: None,
         },
-        NO_HOST_SKILLS_BODY,
-        HIDDEN_HOST_SKILLS_BODY,
+        section.no_skills_body,
+        section.hidden_skills_body,
         on_render,
     );
     match retained_fragment {

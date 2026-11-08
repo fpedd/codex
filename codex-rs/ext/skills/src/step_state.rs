@@ -16,6 +16,8 @@ pub(crate) struct SkillsStepState {
     pub(crate) tools_enabled: bool,
     pub(crate) catalog: SkillStepCatalog,
     pub(crate) host_catalog: Option<SkillCatalog>,
+    /// None when no custom source is registered.
+    pub(crate) custom_catalog: Option<SkillCatalog>,
     pub(crate) cloud_status: CatalogStatus,
     pub(crate) config: crate::SkillsExtensionConfig,
 }

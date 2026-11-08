@@ -13,8 +13,6 @@ use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionMetrics;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::ExtensionWarning;
-use codex_extension_api::PromptFragment;
-use codex_extension_api::PromptSlot;
 use codex_extension_api::SkillInvocationContributor;
 use codex_extension_api::SkillInvocationInput;
 use codex_extension_api::SkillInvocationKind;
@@ -59,6 +57,7 @@ use crate::render_observability::record_catalog_render;
 use crate::selection::collect_explicit_skill_mentions;
 use crate::shadow_selection_experiment::ShadowSelectionExperiment;
 use crate::sources::SkillProviders;
+use crate::state::CustomSkillsCatalogInWorldState;
 use crate::state::HostSkillsCatalogInWorldState;
 use crate::state::SkillsSessionState;
 use crate::state::SkillsThreadState;
@@ -195,66 +194,6 @@ impl<C> ContextContributor for SkillsExtension<C>
 where
     C: Send + Sync + 'static,
 {
-    fn contribute_thread_context<'a>(
-        &'a self,
-        session_store: &'a ExtensionData,
-        thread_store: &'a ExtensionData,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<PromptFragment>> + Send + 'a>> {
-        Box::pin(async move {
-            let Some(thread_state) = thread_store.get::<SkillsThreadState>() else {
-                return Vec::new();
-            };
-            let config = thread_state.config();
-            if !config.include_instructions {
-                return Vec::new();
-            }
-            let catalog = self
-                .providers
-                .list_for_turn(SkillListQuery {
-                    turn_id: thread_store.level_id().to_string(),
-                    executor_roots: Vec::new(),
-                    host_snapshot: None,
-                    include_host_skills: false,
-                    include_bundled_skills: config.bundled_skills_enabled,
-                    include_cloud_skills: false,
-                    mcp_resources: session_store
-                        .get::<SkillsSessionState>()
-                        .and_then(|state| state.mcp_resources.clone()),
-                    executor_capability_discovery: None,
-                    executor_capability_discovery_v2: None,
-                })
-                .await;
-            for warning in bounded_warnings(&catalog.warnings) {
-                self.emit_warning(thread_store.level_id(), /*turn_id*/ None, warning);
-            }
-            let include_usage = thread_store
-                .get::<ModelInfo>()
-                .is_some_and(|model_info| model_info.include_skills_usage_instructions);
-            let extension_metrics = session_store
-                .get::<SkillsSessionState>()
-                .and_then(|state| state.extension_metrics.clone());
-            let rendered = render_catalog(
-                extension_metrics.as_deref(),
-                CatalogSurface::ThreadContext,
-                &catalog,
-                include_usage,
-                SkillCatalogRenderPolicy::EXTENSION_COMPATIBLE
-                    .with_omitted_descriptions(config.omit_descriptions),
-                skill_metadata_budget(/*context_window*/ None, config.max_context_tokens),
-            );
-            if let Some(message) = rendered.warning_message {
-                self.emit_warning(thread_store.level_id(), /*turn_id*/ None, message);
-            }
-            rendered
-                .fragment
-                .map(|fragment| {
-                    PromptFragment::from_fragment(PromptSlot::DeveloperCapabilities, &fragment)
-                })
-                .into_iter()
-                .collect()
-        })
-    }
-
     fn contribute_world_state<'a>(
         &'a self,
         input: WorldStateContributionInput<'a>,
@@ -349,6 +288,9 @@ where
             let host_snapshot = HostSkillsSnapshot::for_step(input.step_store, turn_store);
             let host_catalog_in_world_state =
                 turn_store.get::<HostSkillsCatalogInWorldState>().is_some();
+            let custom_catalog_in_world_state = turn_store
+                .get::<CustomSkillsCatalogInWorldState>()
+                .is_some();
             let Some(step_state) = input.step_store.get::<SkillsStepState>() else {
                 return Vec::new();
             };
@@ -369,6 +311,9 @@ where
             let mut catalog = step_state.catalog.merged.clone();
             if !host_catalog_in_world_state && let Some(host_skills) = host_skills {
                 catalog.extend(host_skills.clone());
+            }
+            if let Some(custom_skills) = &step_state.custom_catalog {
+                catalog.extend(custom_skills.clone());
             }
             catalog.extend(self.providers.list_for_turn(query).await);
             for warning in bounded_warnings(&catalog.warnings) {
@@ -399,10 +344,13 @@ where
             let mut fragments: Vec<Box<dyn ContextualUserFragment + Send>> = Vec::new();
             if config.include_instructions && !host_catalog_in_world_state {
                 let mut turn_catalog = catalog.clone();
-                turn_catalog.entries.retain(|entry| {
-                    entry.authority.kind != SkillSourceKind::Executor
-                        && entry.authority.kind != SkillSourceKind::Cloud
-                });
+                turn_catalog
+                    .entries
+                    .retain(|entry| match entry.authority.kind {
+                        SkillSourceKind::Executor | SkillSourceKind::Cloud => false,
+                        SkillSourceKind::Custom(_) => !custom_catalog_in_world_state,
+                        SkillSourceKind::Host => true,
+                    });
                 let model_info = thread_store.get::<ModelInfo>();
                 let include_usage = model_info
                     .as_deref()

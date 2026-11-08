@@ -600,7 +600,7 @@ impl WorldState {
             "duplicate world-state section ID: {id}"
         );
         let section = Box::new(ExtensionWorldStateSection(section));
-        if id == "host_skills"
+        if matches!(id, "host_skills" | "custom_skills")
             && let Some(index) = self.sections.get_index_of(PermissionsState::ID)
         {
             self.sections.shift_insert(index, id, section);

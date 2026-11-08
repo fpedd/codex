@@ -24,15 +24,18 @@ use crate::render::render_prepared_skill_catalogs;
 use crate::render::skill_metadata_budget;
 use crate::render_observability::CatalogSurface;
 use crate::render_observability::record_catalog_render;
+use crate::state::CustomSkillsCatalogInWorldState;
 use crate::state::EmittedCatalogBudgetWarnings;
 use crate::state::HostSkillsCatalogInWorldState;
 use crate::step_state::CatalogStatus;
 use crate::step_state::SkillToolAuthoritySelector;
 use crate::step_state::SkillsStepState;
+use crate::world_state::CUSTOM_SKILLS_SECTION;
 use crate::world_state::CatalogRenderCallback;
+use crate::world_state::HOST_SKILLS_SECTION;
 use crate::world_state::cloud_skills_world_state_section;
 use crate::world_state::executor_skills_world_state_section;
-use crate::world_state::host_skills_world_state_section;
+use crate::world_state::listed_skills_world_state_section;
 
 // Start with one quarter reserved for filesystem skills, before their inventory is known.
 const FILESYSTEM_BUDGET_DIVISOR: usize = 4;
@@ -55,6 +58,7 @@ enum CatalogKind {
     Executor,
     Cloud,
     Host,
+    Custom,
 }
 
 impl CatalogKind {
@@ -63,6 +67,7 @@ impl CatalogKind {
             Self::Executor => CatalogSurface::ExecutorWorldState,
             Self::Cloud => CatalogSurface::CloudWorldState,
             Self::Host => CatalogSurface::HostWorldState,
+            Self::Custom => CatalogSurface::CustomWorldState,
         }
     }
 }
@@ -85,6 +90,7 @@ struct CatalogContributions {
     executor: CatalogContribution,
     cloud: CatalogContribution,
     host: CatalogContribution,
+    custom: CatalogContribution,
 }
 
 struct RenderedCatalogContribution {
@@ -145,7 +151,7 @@ impl<'a> CatalogRenderingContext<'a> {
         })
     }
 
-    fn render_world_state_catalogs(&self) -> [RenderedCatalogContribution; 3] {
+    fn render_world_state_catalogs(&self) -> [RenderedCatalogContribution; 4] {
         let catalogs = CatalogContributions {
             executor: CatalogContribution {
                 catalog: self
@@ -162,6 +168,13 @@ impl<'a> CatalogRenderingContext<'a> {
                 status: self.step_state.cloud_status,
             },
             host: self.step_state.host_catalog.as_ref().map_or_else(
+                CatalogContribution::unavailable,
+                |catalog| CatalogContribution {
+                    catalog: catalog.clone(),
+                    status: CatalogStatus::Enabled,
+                },
+            ),
+            custom: self.step_state.custom_catalog.as_ref().map_or_else(
                 CatalogContribution::unavailable,
                 |catalog| CatalogContribution {
                     catalog: catalog.clone(),
@@ -235,6 +248,21 @@ impl<'a> CatalogRenderingContext<'a> {
                 self.render_with_cloud_limit(&catalogs, &executor, allocation.cloud_limit);
         }
 
+        // Custom catalogs keep the separate budget and rendering they had as turn input.
+        let custom_policy = SkillCatalogRenderPolicy::EXTENSION_COMPATIBLE
+            .with_omitted_descriptions(self.step_state.config.omit_descriptions);
+        let mut custom_rendered = if self.step_state.config.include_instructions {
+            render_available_skills(
+                &catalogs.custom.catalog,
+                custom_policy,
+                self.metadata_budget,
+                self.include_usage,
+                /*alias_plan*/ None,
+            )
+        } else {
+            None
+        };
+
         if self.step_state.config.catalog_deltas_enabled {
             let cloud = PreparedSkillCatalog::with_alias_plan(
                 &catalogs.cloud.catalog,
@@ -260,10 +288,12 @@ impl<'a> CatalogRenderingContext<'a> {
                 .environments
                 .first()
                 .map(|selection| selection.environment_id.as_str());
+            let custom = PreparedSkillCatalog::new(&catalogs.custom.catalog, custom_policy);
             for (catalog, rendered) in [
                 (&executor, &mut rendered.executor),
                 (&cloud, &mut rendered.cloud),
                 (&host, &mut rendered.host),
+                (&custom, &mut custom_rendered),
             ] {
                 if let Some(rendered) = rendered {
                     rendered.entries = catalog.entries_for_render(
@@ -279,6 +309,7 @@ impl<'a> CatalogRenderingContext<'a> {
             (CatalogKind::Executor, catalogs.executor, rendered.executor),
             (CatalogKind::Cloud, catalogs.cloud, rendered.cloud),
             (CatalogKind::Host, catalogs.host, rendered.host),
+            (CatalogKind::Custom, catalogs.custom, custom_rendered),
         ]
         .map(|(kind, catalog, rendered)| RenderedCatalogContribution {
             kind,
@@ -286,6 +317,7 @@ impl<'a> CatalogRenderingContext<'a> {
             budget: match kind {
                 CatalogKind::Cloud => self.metadata_budget.with_limit(allocation.cloud_limit),
                 CatalogKind::Executor | CatalogKind::Host => filesystem_budget,
+                CatalogKind::Custom => self.metadata_budget,
             },
             allocation,
             rendered,
@@ -444,6 +476,12 @@ impl<'a> CatalogRenderingContext<'a> {
                     }
                     (crate::world_state::HOST_SKILLS_WORLD_STATE_ID, "Host")
                 }
+                CatalogKind::Custom => {
+                    self.input
+                        .turn_store
+                        .insert(CustomSkillsCatalogInWorldState);
+                    (crate::world_state::CUSTOM_SKILLS_WORLD_STATE_ID, "Custom")
+                }
             };
             return skills_delta_section(
                 id,
@@ -451,7 +489,7 @@ impl<'a> CatalogRenderingContext<'a> {
                 CatalogDelta {
                     rendered,
                     include_usage: self.include_usage,
-                    tracks_grants: kind != CatalogKind::Cloud,
+                    tracks_grants: matches!(kind, CatalogKind::Executor | CatalogKind::Host),
                     allocation: (kind == CatalogKind::Cloud).then_some(allocation),
                 },
                 self.input
@@ -485,7 +523,25 @@ impl<'a> CatalogRenderingContext<'a> {
             ),
             CatalogKind::Host => {
                 self.input.turn_store.insert(HostSkillsCatalogInWorldState);
-                host_skills_world_state_section(body, include_instructions, &report, on_render)
+                listed_skills_world_state_section(
+                    &HOST_SKILLS_SECTION,
+                    body,
+                    include_instructions,
+                    &report,
+                    on_render,
+                )
+            }
+            CatalogKind::Custom => {
+                self.input
+                    .turn_store
+                    .insert(CustomSkillsCatalogInWorldState);
+                listed_skills_world_state_section(
+                    &CUSTOM_SKILLS_SECTION,
+                    body,
+                    include_instructions,
+                    &report,
+                    on_render,
+                )
             }
         }
     }
@@ -499,35 +555,46 @@ pub(crate) fn render_world_state_sections(
     let Some(context) = CatalogRenderingContext::new(event_sink, input) else {
         return Vec::new();
     };
-    let used = context
-        .input
-        .previous_world_state
-        .into_iter()
-        .flat_map(|state| {
-            [
-                crate::world_state::SKILLS_WORLD_STATE_ID,
-                crate::world_state::CLOUD_SKILLS_WORLD_STATE_ID,
-                crate::world_state::HOST_SKILLS_WORLD_STATE_ID,
-            ]
+    let remaining_after = |ids: &[&str]| {
+        let used = context
+            .input
+            .previous_world_state
             .into_iter()
-            .filter_map(|id| state.get(id))
-        })
-        .filter_map(|snapshot| snapshot.get("usage"))
-        .filter_map(|usage| CatalogUsage::deserialize(usage).ok())
-        .map(|usage| usage.cost(context.metadata_budget))
-        .sum::<usize>();
-    let mut remaining = context
-        .metadata_budget
-        .with_limit(context.metadata_budget.limit().saturating_sub(used));
+            .flat_map(|state| ids.iter().filter_map(|id| state.get(*id)))
+            .filter_map(|snapshot| snapshot.get("usage"))
+            .filter_map(|usage| CatalogUsage::deserialize(usage).ok())
+            .map(|usage| usage.cost(context.metadata_budget))
+            .sum::<usize>();
+        context
+            .metadata_budget
+            .with_limit(context.metadata_budget.limit().saturating_sub(used))
+    };
+    let mut remaining = remaining_after(&[
+        crate::world_state::SKILLS_WORLD_STATE_ID,
+        crate::world_state::CLOUD_SKILLS_WORLD_STATE_ID,
+        crate::world_state::HOST_SKILLS_WORLD_STATE_ID,
+    ]);
+    // Custom catalog updates spend their own budget, as their full listing does.
+    let mut custom_remaining = remaining_after(&[crate::world_state::CUSTOM_SKILLS_WORLD_STATE_ID]);
     context
         .render_world_state_catalogs()
         .into_iter()
         // Keep empty snapshots too: a source that becomes available later must use
         // the same remaining budget instead of publishing another initial catalog.
+        // Custom sources are registered up front, so an unavailable custom catalog never
+        // becomes available later.
         .filter(|catalog| {
-            context.step_state.config.catalog_deltas_enabled
-                || catalog.status != CatalogStatus::Unavailable
+            catalog.status != CatalogStatus::Unavailable
+                || (context.step_state.config.catalog_deltas_enabled
+                    && catalog.kind != CatalogKind::Custom)
         })
-        .map(|catalog| context.build_world_state_section(catalog, &mut remaining))
+        .map(|catalog| {
+            let remaining = if catalog.kind == CatalogKind::Custom {
+                &mut custom_remaining
+            } else {
+                &mut remaining
+            };
+            context.build_world_state_section(catalog, remaining)
+        })
         .collect()
 }
